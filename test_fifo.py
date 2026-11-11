@@ -18,7 +18,8 @@ from models.fifo_model import FifoModel
 
 WIDTH = 8
 DEPTH = 8
-SEED = 0xDEADBEEF
+# SEED = 0xDEADBEEF
+SEED = 0xCAFEF00D
 CYCLES = 1200
 MASK = (1 << WIDTH) - 1
 
