@@ -1,4 +1,4 @@
-# FINDINGS — < Porject1> · < Ha Anh Khoi Tran>
+# FINDINGS — < Project1>
 
 > The number is the start of the argument, not the end of it. This file is
 > where you say what the number means and what it does not cover.
