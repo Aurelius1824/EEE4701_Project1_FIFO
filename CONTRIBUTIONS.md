@@ -12,6 +12,6 @@
 - Reviewed and analyzed the report by providing additional details, fixing grammar mistakes, and ensuring all the information is accurate to our program.
 - Outlined the environment, AI usage, and summary sections.
 ## Ha Anh Khoi Tran
--defined the Finding.md file
--Wrote "Constrained-random stimulus" and " Mutation and result, survivor" in the report..
--Review and follow up the report. 
+- Defined the Finding.md file.
+- Wrote "Constrained-random stimulus" and " Mutation and result, survivor" in the report.
+- Review and follow up the report. 
