@@ -1,413 +1,266 @@
 # FIFO Verification Plan -- Project 1
 
 ## 1. Objective & Scope
-The objective of this project is the verification of a DUT that we did not write, in this case, a synchronous FIFO. We are to verify this DUT against it's written spec using a layered testbench, constrained-random stimuli, functional coverage, and mutation observation optimization
 
-The verification will focus on data ordering, occupany tracking, status flags, reset behavior, boundary conditions, simultaneous operations, and pointer wraparound.
+The objective of this project is to verify a design under test (DUT) that the verification team did not write: a synchronous first-word fall-through (FWFT) FIFO. The DUT will be evaluated against its written specification using a layered testbench, constrained-random stimulus, directed scenarios, functional coverage, scoreboard checking, and mutation analysis.
 
-The verification environement will distinguish between:
-* Stimulus Reachability: Whether a scenario was driven.
-* Functional Coverage: Whether the planned feature or cross was observed.
-* Checking and Observabaility: Whether incorrect DUT behaviour would be detected.
-* Mutation Detection: Whether the testbench detects injected design faults.
+The verification focuses on data ordering, occupancy tracking, status flags, reset behavior, boundary conditions, simultaneous operations, idle behavior, and circular pointer wraparound. The configured instance uses an 8-bit data width and an eight-entry FIFO depth.
 
-The team will no treat passing simulation or a high mutant detection score alone as proof of complete verification.
-
----
+The verification environment distinguishes between stimulus reachability (whether a scenario was driven), functional coverage (whether the defined model records the scenario), checking and observability (whether an incorrect response would be detected), and mutation detection (whether an injected implementation fault is detected). A passing simulation, high coverage percentage, or high mutation score is not independently sufficient to establish complete verification.
 
 ## 2. DUT Configuration & Specification
-Parameter   | Configuration
-===========================
-Data Width  | 8 bits 
-FIFO Depth  | 8 Entries
-Clk         | Synchronous clock
-RST         | Active-Low (RST_N)
-Output mode | FWFT
 
-The verification effort focuses on the following behavioral properties:
-* Correct synchronous reset operation.
-* Correct write and read acceptance conditions.
-* Prevention of overflow and underflow.
-* Accurate occupancy tracking and status flags.
-* Correct simultaneous read/write behavior.
-* Preservation of FIFO data ordering.
-* Correct FWFT head-data presentation.
-* Proper pointer progression and wraparound.
-* Stability of FIFO state during idle operation.
+| Parameter | Configuration |
+|---|---|
+| Data width | 8 bits |
+| FIFO depth | 8 entries |
+| Clock | Synchronous, active on rising edge |
+| Reset | Active-low synchronous (`rst_n`) |
+| Output mode | First-word fall-through (FWFT) |
 
-Verification will combine constrained-random stimulus with directed corner-case sequences. Functional coverage and mutation testing will provide quantitative evidence of stimulus completeness and verification effectiveness.
+The behavioral reference is `Spec/fifo.md`; `Spec/fifo.sv` is the supplied SystemVerilog implementation. Expected behavior must be derived from the written specification, not inferred from implementation details.
 
-The goal is not simply to demonstrate that the DUT passes simulation, but to demonstrate that the verification environment systematically exercises the specified behaviors and detects representative design faults.
+The verification focuses on:
+- Synchronous reset: on the active rising edge while reset is asserted, occupancy clears, `empty=1`, and `full=0`.
+- Write acceptance: a write is accepted when `wr_en=1` and the pre-edge FIFO is not full. A write while full is dropped.
+- Read acceptance: a read is accepted when `rd_en=1` and the pre-edge FIFO is not empty. A read while empty is ignored.
+- Simultaneous read/write: in a nonempty, nonfull state, one entry is removed and one is added on the same edge; occupancy remains unchanged and ordering is preserved.
+- Status flags: `full` is asserted exactly at depth and `empty` exactly at zero.
+- Ordering: accepted entries are returned in FIFO order.
+- FWFT behavior: `rd_data` presents the oldest entry whenever the FIFO is nonempty.
+
+All four `wr_en`/`rd_en` combinations are legal stimulus. Read-while-empty and write-while-full are legal boundary requests whose effects must be checked, not illegal transactions. The reference model applies acceptance rules using pre-edge occupancy.
 
 ## 3. Verification Architecture
-The existing HW5 testbench is organized into separate verification components. Project 1 will retain this architecture and formalize the responsibilities of each component.
+
+The testbench is organized into components with distinct responsibilities. The implementation is in `test_fifo.py`.
 
 **Transaction Generator -- FifoTxn**
-Implementation: @vsc.randobj constrained-random transaction class.
 
-The transaction generator produces:
-* wr_en: Randomized write enable.
-* rd_en: Randomized read enable.
-* wr_data: Randomized write data.
-* count: Non-random occupancy input used to shape the distribution.
+The PyVSC `@vsc.randobj` transaction contains randomized `wr_en`, `rd_en`, and `wr_data`, plus a non-random `count` input supplied from the reference model before randomization. The `c_bias()` constraint applies occupancy-dependent distributions:
 
-The occupancy-dependent constraint function c_bias() applies different probability distributions depending on the FIFO occupancy.
+| Occupancy region | Write enable | Read enable |
+|---|---:|---:|
+| Near empty (`count <= 1`) | 72% on / 28% off | 42% on / 58% off |
+| Near full (`count >= DEPTH-1`) | 42% on / 58% off | 72% on / 28% off |
+| Interior | 80% on / 20% off | 80% on / 20% off |
 
-| Occupancy region | Write enable distribution | Read enable distribution |
-|---|---|---|
-| Near empty (`count <= 1`) | 72% enabled / 28% disabled | 42% enabled / 58% disabled |
-| Near full (`count >= DEPTH-1`) | 42% enabled / 58% disabled | 72% enabled / 28% disabled |
-| Interior occupancy | 80% enabled / 20% disabled | 80% enabled / 20% disabled |
-
-These weights encourage filling near empty, draining near full, and simultaneous read/write activity in the interior.
-
-The generator also injects representative corner-data patterns periodically, including all-zero, all-one, alternating-bit, and selected boundary-bit patterns.
-
-All combinations of read and write enables are legal under the FIFO specification. Boundary requests are intentionally generated to verify their specified acceptance or rejection behavior.
+These are intended solver weights, not guaranteed measured frequencies. The actual distribution should be evaluated from run data. Every fourth post-randomization transaction also receives a selected corner-data value from the pattern list.
 
 **Driver -- FifoDriver**
-The driver is responsible for applying input transactions to the DUT.
 
-Responsibilities:
-* Drive rst_n, wr_en, rd_en, and wr_data.
-* Apply input changes on the falling clock edge.
-* Maintain stable inputs around the active rising clock edge.
-* Support reset injection during normal operation.
-* Provide both randomized and directed transactions.
-
-Driving inputs on the falling edge allows the DUT to sample stable inputs on the next rising edge.
+The driver applies `rst_n`, `wr_en`, `rd_en`, and `wr_data` on the falling clock edge so inputs are stable before the active rising edge. It supports randomized and directed transactions, including reset injection during normal operation.
 
 **Monitor -- FifoMonitor**
-The monitor samples the observable DUT outputs and returns them to the scoreboard.
 
-Signals monitored:
-* count
-* full
-* empty
-* rd_data, when nonempty
+The monitor samples `count`, `full`, and `empty` and checks that they are resolvable. It checks `rd_data` for resolvability only when the FIFO is nonempty. No value requirement is imposed on `rd_data` while empty because the specification leaves it undefined in that condition.
 
-The monitor checks that required status outputs are resolvable and that rd_data is resolvable whenever the FIFO is nonempty.
+**Golden Model and Scoreboard -- FifoModel / FifoScoreboard**
 
-The monitor does not impose validity requirements on rd_data when empty because the specification leaves that output undefined in this condition.
+The reference model maintains an independent queue of expected entries and applies the specification's acceptance rules using pre-edge state. The scoreboard checks:
+- Occupancy is within zero through depth and matches the model.
+- `full` and `empty` agree with occupancy and the model.
+- The FWFT head matches the oldest model entry whenever nonempty.
+- Synchronous reset produces the required empty state.
+- State outputs do not change before the active rising edge in response to input changes.
 
-**Golden Model & Scoreboard -- FifoModel / FifoScoreboard**
-The scoreboard compares the observed DUT behavior against an independent golden model.
-
-The reference model maintains the expected FIFO state and data ordering. Its behavior must follow the written specification rather than assumptions derived from the DUT implementation.
-
-The scoreboard verifies:
-- Occupancy matches the reference model.
-- full matches the expected full condition.
-- empty matches the expected empty condition.
-- FWFT head data matches the expected oldest FIFO entry whenever nonempty.
-- Occupancy remains within the legal range.
-- Full and empty flags remain consistent with occupancy.
-- Reset produces the required empty state.
-- Input changes before the active clock edge do not cause unintended combinational changes to registered FIFO state outputs.
+The model is the functional oracle. It must not reproduce implementation-specific pointer arithmetic or internal memory behavior unless that behavior is specified.
 
 **Testbench Coordinator -- FifoTB**
-Testbench Coordinator — FifoTB
 
-The top-level testbench coordinates the driver, monitor, reference model, scoreboard, and coverage collection.
-
-Responsibilities:
-* Initialize and reset the DUT.
-* Generate and execute transactions.
-* Update the reference model.
-* Invoke scoreboard comparisons.
-* Record functional coverage.
-* Track stimulus reachability.
-* Execute directed coverage-closure sequences.
-* Report failed checks with cycle and transaction context.
-
----
+The coordinator initializes the DUT, sequences the driver, updates the reference model, invokes scoreboard checks, samples coverage, tracks visited occupancy values, and runs directed closure sequences. Failures should include cycle and transaction context.
 
 ## 4. Functional Coverage Plan
-Functional coverage will demonstrate that the verification environment has exercised the relevant FIFO states, operations, and corner cases.
 
-The existing HW5 implementation already tracks occupancy and several important stimulus conditions through manual coverage indicators. 
+Functional coverage measures whether the testbench exercised selected FIFO states, operations, and corner cases. Coverage is sampled per transaction using the reference model's pre-edge occupancy and the requested operation.
 
 **Occupancy Coverage**
-The FIFO has nine possible occupancy values.
 
-| Bin | Condition |
-|---|---|
-| EMPTY | count = 0 |
-| ONE_ENTRY | count = 1 |
-| INTERIOR | count = 2 through 6 |
-| ONE_SLOT_LEFT | count = 7 |
-| FULL | count = 8 |
-
-An additional exact-occupancy coverpoint will distinguish all values from 0 through 8.
-
-**Coverage objective:** Exercise every legal occupancy state.
+The FIFO has nine legal occupancy values. Exact bins from zero through eight are required. Grouped descriptions (empty, one-entry, interior, one-slot-left, full) may aid reporting but do not replace exact occupancy bins.
 
 **Operation Coverage**
-| Bin | Condition |
-|---|---|
-| IDLE | `wr_en=0`, `rd_en=0` |
-| WRITE_ONLY | `wr_en=1`, `rd_en=0` |
-| READ_ONLY | `wr_en=0`, `rd_en=1` |
-| SIMULTANEOUS_RW | `wr_en=1`, `rd_en=1` |
 
-**Coverage objective:** Exercise all four input-enable combinations.
+Four operation bins are required: idle, write-only, read-only, and simultaneous read/write. These classify requested enables. A separate accepted-action classification distinguishes requests from operations actually accepted by the FIFO.
 
 **Boundary Coverage**
-The following conditions will be tracked independently:
 
-| Coverage bin | Condition |
-|---|---|
-| READ_WHILE_EMPTY | `rd_en=1`, pre-count=0 |
-| WRITE_WHILE_FULL | `wr_en=1`, pre-count=DEPTH |
-| SIM_RW_EMPTY | `wr_en=1`, `rd_en=1`, pre-count=0 |
-| SIM_RW_FULL | `wr_en=1`, `rd_en=1`, pre-count=DEPTH |
-| SIM_RW_ONE | Both enables asserted, pre-count=1 |
-| SIM_RW_INTERIOR | Both enables asserted, pre-count=2 through 6 |
-| SIM_RW_NEAR_FULL | Both enables asserted, pre-count=7 |
-
-**Coverage objective:** Exercise read/write acceptance and rejection behavior at critical occupancy boundaries.
+The model tracks reset, empty-state, full-state, interior-state, read-while-empty, write-while-full, simultaneous-at-empty, simultaneous-at-full, and simultaneous-in-interior conditions. Classification uses pre-edge occupancy. Directed tests separately call out one-entry and near-full simultaneous cases.
 
 **Reset Coverage**
-Reset coverage will include:
-- Initial reset.
-- Reset from nonempty occupancy.
-- Reset while read and write enables are asserted.
-- Recovery after reset.
-- Correct count, full, and empty values following reset.
 
-The reset operation will be checked at the active rising clock edge, consistent with the synchronous reset specification.
+Reset coverage includes initial reset, operational reset from nonempty occupancy, reset with each combination of read/write enables, repeated reset assertion, and post-reset recovery. The directed reset sweep exercises occupancies zero through eight under all four enable combinations. Post-reset checks attempt a read while empty, refill, and drain to ensure stale contents do not reappear.
 
 **Data Coverage**
-Representative data patterns will include:
 
-| Pattern | Purpose |
-|---|---|
-| `0x00` | All-zero data |
-| `0xFF` | All-one data |
-| `0xAA` | Alternating bits |
-| `0x55` | Complementary alternating bits |
-| Walking one | Detect individual bit-path faults |
-| Walking zero | Detect stuck-at-one and masking faults |
-| Random data | Exercise varied payload combinations |
-
-The data coverage model will track the occurrence of each pattern class.
+Data classes include zero, all ones, alternating patterns, MSB-only, LSB-only, and other/random. The pattern list includes `0x00`, `0xFF`, `0xAA`, `0x55`, `0x80`, and `0x01`. Walking-one and walking-zero sequences are directed stimulus; they should not be described as separate coverage bins unless the model explicitly distinguishes them.
 
 **Pointer and Ordering Coverage**
-Pointer wraparound will be exercised through repeated fill, drain, and simultaneous read/write operations.
 
-The verification environment will check:
-- Repeated write-pointer wraparound.
-- Repeated read-pointer wraparound.
-- FIFO ordering across pointer boundaries.
-- Data integrity during simultaneous operations.
-- Preservation of data during rejected operations and idle cycles.
-
-The current scoreboard verifies ordering through the FWFT head comparison. Explicit pointer wrap coverage will be added to the coverage collector using observable operation sequences rather than assuming access to internal DUT pointers.
+Internal pointers are not treated as externally observable signals. Accepted read/write counts serve as wraparound proxies, while repeated traffic crosses the circular-buffer boundary. Ordering is checked by comparing each valid FWFT head against the reference queue. These proxies do not prove the internal pointer value directly.
 
 **Cross Coverage**
-The following crosses are prioritized:
 
-| Cross | Dimensions | Verification objective |
+The executable model contains the following crosses:
+
+| Cross | Dimensions | Objective |
 |---|---|---|
-| COV-01 | Occupancy × Operation | Verify each operation at different occupancy states |
-| COV-02 | Occupancy × Simultaneous R/W | Verify simultaneous-operation behavior at boundaries and interior states |
-| COV-03 | Occupancy × Boundary Attempt | Verify read-while-empty and write-while-full behavior |
-| COV-04 | Reset × Operation Enables | Exercise reset with idle and active enables |
-| COV-05 | Operation × Data Pattern | Exercise data-path patterns under different operations |
+| `occupancy_x_operation` | Exact occupancy × requested operation | Exercise operations at each meaningful occupancy. |
+| `occupancy_x_boundary` | Exact occupancy × boundary classification | Exercise boundary and reset conditions in relevant states. |
+| `operation_x_boundary` | Requested operation × boundary classification | Pair boundary requests with their operation. |
 
-Crosses will be constructed with appropriate exclusions or ignore bins for combinations that cannot occur or are not meaningful.
+Impossible combinations are excluded using documented ignore bins. For example, a full-state boundary cannot occur at occupancy three. The sampler checks that no observed transaction maps to an ignored combination.
 
-The team will not use arbitrary cross-coverage combinations that inflate the coverage denominator without adding verification value.
+The current executable model does not implement every cross proposed in the initial planning discussion. In particular, reset-by-enable and operation-by-data-pattern are not separate implemented crosses. Results must not claim those crosses are closed unless they are implemented and exported.
 
 **Illegal and Ignore Bins**
 
-The FIFO specification permits all four combinations of `wr_en` and `rd_en`. Therefore, none of those combinations will be classified as illegal stimulus.
+No read/write enable combination is illegal. Read-while-empty and write-while-full are legal requests. Empty-state `rd_data` is excluded from data comparisons because it is unspecified. Ignore bins are permitted only for impossible or meaningless combinations justified by the classifier or specification; difficult-to-reach legal scenarios must not be ignored merely to improve coverage.
 
-Read-while-empty and write-while-full are legal requests with specified ignored/dropped behavior, not illegal transactions.
+## 5. Feature List
 
-Undefined empty-state `rd_data` observations will be excluded from data comparisons.
+Each feature has a stable identifier used by the test matrix, coverage objectives, and results report. A feature is exercised when its stimulus occurs and checked when the corresponding scoreboard or monitor assertion evaluates the result.
 
-Any additional ignore bins must be justified by the written specification.
+| Feature ID | Feature | Description and expected behavior |
+|---|---|---|
+| FIFO-01 | Synchronous reset | Active-low reset clears occupancy on the next rising edge and sets `empty=1`, `full=0`; exercised initially and during operation. |
+| FIFO-02 | Write acceptance | A write in a nonfull state is accepted and appended to the FIFO in order. |
+| FIFO-03 | Full-state write rejection | A write while full is dropped; occupancy and existing contents remain unchanged. |
+| FIFO-04 | Read acceptance | A read in a nonempty state removes exactly the oldest entry and updates occupancy. |
+| FIFO-05 | Empty-state read rejection | A read while empty is ignored; the FIFO remains empty without underflow. |
+| FIFO-06 | Simultaneous read/write | Acceptance follows pre-edge empty/full conditions; in a nonempty, nonfull state both operations occur and occupancy remains unchanged. |
+| FIFO-07 | Occupancy and status flags | Count remains from zero through depth; `full` and `empty` match occupancy. |
+| FIFO-08 | FIFO ordering and FWFT output | When nonempty, output presents the oldest queued entry; accepted operations preserve FIFO order. |
+| FIFO-09 | Data-path integrity | Corner values and walking-bit patterns are stored and returned without corruption. |
+| FIFO-10 | Circular progression and idle stability | Repeated accepted traffic crosses the circular-buffer boundary without ordering errors; idle cycles preserve state and valid head data. |
 
----
+These are externally specified behaviors. The feature list does not imply direct observation of internal pointers or every internal memory location.
 
-## 5. Test Matrix and Requirement Traceability
-The following matrix maps planned verification tests to the specification requirements and functional coverage objectives.
+## 6. Test Matrix and Requirement Traceability
 
-| Test ID | Test scenario | Specification requirements | Coverage objectives |
-|---|---|---|---|
-| T01 | Initial synchronous reset | FIFO-01, FIFO-07 | Reset, empty occupancy |
-| T02 | Fill FIFO from empty to full | FIFO-02, FIFO-07 | Exact occupancy, WRITE_ONLY |
-| T03 | Drain FIFO from full to empty | FIFO-04, FIFO-07, FIFO-09 | Exact occupancy, READ_ONLY |
-| T04 | Write while full | FIFO-03 | WRITE_WHILE_FULL |
-| T05 | Read while empty | FIFO-05 | READ_WHILE_EMPTY |
-| T06 | Simultaneous read/write in interior | FIFO-06 | SIMULTANEOUS_RW, interior occupancy |
-| T07 | Simultaneous read/write at empty and full | FIFO-02–FIFO-06 | SIM_RW_EMPTY, SIM_RW_FULL |
-| T08 | Simultaneous read/write at one entry | FIFO-06, FIFO-08 | SIM_RW_ONE, ordering |
-| T09 | Repeated pointer wraparound | FIFO-08, FIFO-10 | Pointer wrap, ordering |
-| T10 | Idle-hold behavior | FIFO-02, FIFO-04, FIFO-08 | IDLE × occupancy |
-| T11 | Directed data-pattern sequences | FIFO-08, FIFO-09 | Data-pattern coverage |
-| T12 | Operational reset with active enables | FIFO-01 | Reset × operation enables |
-| T13 | Constrained-random interleaving | FIFO-02–FIFO-10 | Occupancy, operation, and cross coverage |
-| T14 | Final directed coverage sweep | FIFO-01–FIFO-10 | Missing-bin closure |
+The current testbench implements these scenarios as directed portions of the single Cocotb test entry point `fifo_test_CRV`. The IDs below are scenario identifiers, not separate Cocotb test functions.
 
-Each test will be associated with the corresponding scoreboard checks and coverage bins.
+| Test ID | Test scenario | Feature IDs | Stimulus and expected check | Coverage evidence |
+|---|---|---|---|---|
+| T01 | Initial synchronous reset | FIFO-01, FIFO-07 | Assert reset across rising edges; check count=0, empty=1, full=0. | Reset, occupancy 0, reset action. |
+| T02 | Fill from empty to full | FIFO-02, FIFO-07, FIFO-08 | Write distinct values to depth; check acceptance and status transitions. | Occupancy 0..8, write-only, accepted write. |
+| T03 | Drain full to empty | FIFO-04, FIFO-07, FIFO-08 | Read until empty; compare each FWFT head with queue order. | Occupancy 8..0, read-only, accepted read. |
+| T04 | Write while full | FIFO-03, FIFO-07, FIFO-08 | Assert write while full; verify no count or stored-data change. | Full-state/write-while-full boundary. |
+| T05 | Read while empty | FIFO-05, FIFO-07 | Assert read while empty; verify count and flags remain empty. | Empty-state/read-while-empty boundary. |
+| T06 | Simultaneous read/write in interior | FIFO-06, FIFO-07, FIFO-08 | Assert both enables at interior occupancy; check count preservation and head advancement. | Simultaneous operation/interior boundary. |
+| T07 | Simultaneous read/write at empty and full | FIFO-03 through FIFO-06 | At empty, write may be accepted and read ignored; at full, read may be accepted and write dropped. | Simultaneous-at-empty/full. |
+| T08 | Simultaneous read/write at one entry | FIFO-06, FIFO-08 | At occupancy one, consume old head and verify new write becomes next head. | Occupancy one/simultaneous operation. |
+| T09 | Repeated pointer-wrap traffic | FIFO-08, FIFO-09, FIFO-10 | Repeat accepted writes/reads across multiple rotations; compare visible data. | Read/write wrap proxies and operation coverage. |
+| T10 | Idle hold at each occupancy | FIFO-07, FIFO-08, FIFO-10 | Apply no requests at each occupancy; check count, flags, and valid head stability. | Idle operation across occupancy bins. |
+| T11 | Directed data patterns | FIFO-08, FIFO-09 | Write/read corner values and walking-bit patterns; compare returned values. | Data-pattern coverpoint and accepted actions. |
+| T12 | Operational reset with active enables | FIFO-01, FIFO-07, FIFO-08 | Assert reset at occupancy states with idle, write-only, read-only, and simultaneous requests; check reset and recovery. | Reset boundary and operation classification. |
+| T13 | Constrained-random interleaving | FIFO-01 through FIFO-10 | Run seeded transactions using model occupancy; scoreboard checks each cycle. | Occupancy, operation, boundary, data, action, and crosses. |
+| T14 | Directed coverage-closure sweep | FIFO-01 through FIFO-10 | Visit all occupancy values, close legal bins, run reset sweep and recovery checks. | Final coverage export and closure assertions. |
 
----
+The test function contains an initial reset, a configured 1,200-iteration constrained-random loop, and subsequent directed closure scenarios. Two reset-injection points can replace a random transaction when occupancy is nonzero; therefore, describe this as 1,200 configured loop iterations, not necessarily 1,200 randomized transactions. Directed scenarios run in addition to the loop.
 
-## 6. Constrained-Random Verification Strategy
+Traceability is bidirectional: every feature appears in at least one test row, and every test row identifies the feature or features it exercises. Where a feature has no dedicated coverage bin, cite the directed scenario and scoreboard check rather than implying the coverage database proves it.
 
-**Randomization Approach**
-The verification environment uses occupancy-dependent constraints to increase the likelihood of exercising boundary conditions and simultaneous operations.
+## 7. Constrained-Random Verification Strategy
 
-The randomized transaction contains:
-- Read enable.
-- Write enable.
-- Write data.
-- Current FIFO occupancy as a non-random constraint input.
+The constrained-random phase explores combinations of read enable, write enable, and write data under changing occupancy. Before randomization, the testbench supplies the reference model's current occupancy. The driver applies the generated transaction on the falling edge for evaluation on the following rising edge.
 
-The occupancy is updated from the reference model before each transaction is randomized.
-
-**Randomization Distribution**
-The constraint distribution is intentionally nonuniform.
-
-Near empty, write operations receive a higher probability to encourage filling.
-
-Near full, read operations receive a higher probability to encourage draining.
-
-In the interior, both enables receive higher probabilities to increase simultaneous operation frequency.
-
-A fixed seed, DEADBEEF, is used to make the randomized sequence reproducible.
-
-**Directed Coverage Closure**
-The existing HW5 implementation supplements randomized stimulus with directed sequences.
-
-These include:
-- Occupancy adjustment through directed fill and drain.
-- Idle-hold checks at each occupancy.
-- Repeated simultaneous read/write operations.
-- Walking-one and walking-zero data sequences.
-- Repeated read-while-empty and write-while-full attempts.
-- Uninterrupted FIFO fill and drain sequences.
-
-These sequences are retained because they guarantee exercise of important boundary and pointer-transition conditions.
-
-The team will document which coverage holes were closed through constraint adjustments and which required directed sequences.
-
-**Reproducibility**
-The regression will record:
-- Random seed.
-- Number of randomized cycles.
-- FIFO parameter configuration.
-- Simulator and test command.
-- Coverage results.
-- Mutation results.
-
-The current HW5 baseline uses seed `0xDEADBEEF` and 1,200 constrained-random cycles before the directed closure phase.
-
----
-
-## 7. Coverage Closure and Convergence Criteria
-Coverage closure will be performed through measured iteration rather than assuming that a sufficiently long random run automatically exercises every relevant scenario.
-
-The process is:
-1. Run the seeded constrained-random regression.
-2. Collect occupancy and operation coverage.
-3. Identify missing bins and crosses.
-4. Determine whether missing coverage is caused by insufficient stimulus probability, an unreachable combination, or a missing directed sequence.
-5. Modify constraints or add a justified directed sequence.
-6. Re-run the regression.
-7. Verify that the targeted coverage bins have been reached.
-8. Confirm that scoreboard checks still pass.
-9. Repeat from step 5 as needed
-10. Preserve the final regression configuration and results.
-
-**Coverage Closure Criteria**
-| Metric | Closure criterion |
+| Item | Current configuration |
 |---|---|
-| Occupancy | All nine occupancy values observed |
-| Operation | All four read/write enable combinations observed |
-| Boundary attempts | Read-while-empty and write-while-full observed |
-| Simultaneous operations | Empty, one-entry, interior, near-full, and full cases observed |
-| Reset | Initial and operational reset scenarios exercised |
-| Data patterns | All planned representative patterns observed |
-| Pointer wrap | Read and write pointer wrap sequences exercised |
-| Scoreboard | No unexplained mismatches |
-| Cross coverage | All required, reachable bins covered or explicitly justified |
+| Width | 8 bits |
+| Depth | 8 entries |
+| Seed | `0xCAFEF00D` |
+| Configured loop iterations | 1,200 |
+| Cocotb entry point | `fifo_test_CRV` |
 
-Coverage closure will be reported alongside the model definition and documented exclusions.
+The earlier seed `0xDEADBEEF` appears in initial planning material but is not the active seed in the current `test_fifo.py`. The executable source and reported run configuration must agree. A regression record should capture source revision, simulator, command, seed, parameters, and coverage export.
 
----
+The `c_bias()` weights are intended to favor filling near empty, draining near full, and enabling both operations more often in the interior. They are solver weights, not measured percentages. A histogram of actual generated operations by occupancy region is needed before claiming that the distribution behaves as intended.
 
-## 8. Mutation Testing and Verification Effectiveness
-Mutation testing will be used to assess whether the verification environment detects representative FIFO implementation faults.
+Directed stimulus remains necessary because randomization does not guarantee specific sequences. Reset at a chosen occupancy, repeated pointer-wrap traffic, and walking-bit sweeps are more efficiently and deterministically generated by directed tasks.
 
-The team will execute the prescribed mutation command against the released mutant pool and record the resulting found/total score.
+## 8. Coverage Model
 
-The previous HW5 baseline achieved:
-- Released mutants: 8/8 found.
-- Hidden mutants: 12/12 found.
+The executable cocotb-coverage model in `test_fifo.py` contains eight individual coverpoints:
 
-These values are historical HW5 results and will not automatically be presented as Project 1 results until the corresponding Project 1 gradescopr submission has been executed.
+| Coverpoint | Bins | Meaning |
+|---|---:|---|
+| `fifo.occupancy` | 9 | Exact pre-edge occupancy, 0 through 8. |
+| `fifo.operation` | 4 | Idle, write-only, read-only, simultaneous. |
+| `fifo.boundary` | 9 | Reset, state classifications, and boundary requests. |
+| `fifo.data_pattern` | 7 | Zero, all ones, alternating, MSB-only, LSB-only, other. |
+| `fifo.accepted_action` | 5 | None, write, read, read-and-write, reset. |
+| `fifo.reset` | 2 | Reset asserted or deasserted. |
+| `fifo.write_wrap_proxy` | 2 | Accepted writes reached the depth threshold or not. |
+| `fifo.read_wrap_proxy` | 2 | Accepted reads reached the depth threshold or not. |
 
-**Mutation Analysis**
-Mutation findings will be categorized by:
-- Fault type.
-- Stimulus reachability.
-- Output observability.
-- Scoreboard detection.
-- Relevant coverage bins.
+The model also contains three crosses: occupancy × operation (36 bins), occupancy × boundary (29 legal bins after exclusions), and operation × boundary (16 legal bins after exclusions). The resulting defined model contains 121 bins. The initial model reported 111/193 (57.51%); analysis identified 72 impossible cross combinations and 10 reset-related holes. The exclusions reduced the cross denominator, and the directed reset sweep exercised reset scenarios. The final exported result is reported as 121/121 (100%).
 
-**Residual Risk**
+This percentage applies only to the implemented model. It does not mean that all possible FIFO behavior, every feature proposed in the initial planning discussion, or all possible implementation faults have been verified. Reset-by-enable and operation-by-data-pattern are not separate crosses in the current model, and pointer wrap is represented by accepted-operation proxies rather than direct pointer observation. These qualifications must remain in the results report.
 
-A high mutation score does not establish that every possible FIFO fault can be detected.
+Coverage uses pre-edge occupancy because full/empty requests are evaluated against the state before the active edge. The sampler checks that no observed sample maps to an ignored bin, helping prevent exclusions from concealing a classification error.
 
-Known limitations include:
-1. **Unoccupied memory corruption:** A fault that corrupts an unoccupied internal memory location may remain undetected if the corrupted location is overwritten before becoming the FIFO head.
+## 9. Risk and Spec Ambiguity
 
-2. **Undefined empty-state output:** The specification does not define `rd_data` when empty. Therefore, incorrect behavior confined to this condition cannot be classified as a specification violation by the current scoreboard.
+The written FIFO specification is the authority for expected behavior. Where it does not define behavior, the testbench must not invent a pass/fail requirement. The specification leaves `rd_data` undefined while empty; accordingly, the monitor and scoreboard do not require a particular empty-state value and do not compare it against the model.
 
-3. **Unmodeled internal implementation faults:** Faults that do not propagate to an observable output may remain undetected without additional observability or assertions.
+The specification describes simultaneous read and write in a nonempty, nonfull state, while the testbench also exercises simultaneous requests at empty and full. The reference model applies the individual acceptance rules using pre-edge state: at empty, the write may be accepted and the read is ignored; at full, the read may be accepted and the write is dropped. If the course specification or instructor defines a different priority for these boundary combinations, that clarification must supersede this interpretation and the model must be updated.
 
-The final findings report will distinguish between stimulus reachability gaps and output observability gaps.
+Reset is active-low and synchronous. Assertion between rising edges must not be treated as immediate state clearing. The scoreboard checks state before and after the active edge to distinguish synchronous behavior from unintended asynchronous changes. The specification does not define reset-domain crossing, metastability, or physical reset timing.
 
----
+The interface exposes occupancy, flags, and FWFT data, but not internal pointers or individual memory locations. Wraparound coverage is therefore proxy-based. A pointer fault that does not affect visible head data, flags, or count during the tested sequence may escape detection. Similarly, corruption of an unoccupied memory location may remain hidden if that location is overwritten before it reaches the read pointer.
 
-## 9. Regression and Sign-Off
-The final verification environment will be considered ready for sign-off when the following conditions are satisfied:
+The verification plan does NOT verify internal pointer values, physical memory-cell integrity, RAM inference quality, timing closure, maximum operating frequency, power, area, metastability, reset-domain crossing, or behavior outside the specified parameter configuration. It does not establish correctness for arbitrary WIDTH and DEPTH values merely because the RTL is parameterized; the current testbench configures WIDTH=8 and DEPTH=8. It does not require a value for `rd_data` when empty, and it cannot classify unspecified behavior as a design failure. It also does not prove the absence of all possible defects: mutation testing evaluates only the supplied mutant population, while functional coverage measures only bins explicitly represented in the model.
 
-- The complete testbench executes successfully.
-- All required scoreboard comparisons pass.
-- Every specified FIFO occupancy state is exercised.
-- All required operation and boundary scenarios are exercised.
-- The functional coverage model is implemented and its report is generated.
-- Required cross-coverage targets are reached or justified.
-- Constrained-random stimulus is reproducible.
-- The prescribed mutation regression is executed.
-- Mutation findings and residual risks are documented.
-- All team deliverables are completed.
+Risk treatment depends on reachability and observability. If a fault is not reached, add a directed or constrained-random scenario that drives the relevant state. If a fault is reached but not observed, strengthen the checker only when the written contract provides an observable expected result. Internal probes may improve diagnosis but must be distinguished from interface-level requirements.
 
+## 10. Closure Criteria
+
+Coverage closure is measured by running the regression, inspecting the exported coverage database, classifying uncovered bins, and determining whether each bin is reachable and meaningful. A missing legal bin requires additional stimulus or a documented limitation. An impossible bin may be excluded only with a reason tied to the classifier or specification. A difficult-to-reach legal scenario must not be ignored merely to increase the percentage.
+
+The verification effort is considered functionally closed for this configuration when all of the following are satisfied:
+
+1. **Execution:** the prescribed test command completes without simulator errors or unhandled testbench exceptions.
+2. **Scoreboard:** all pre-edge and post-edge checks pass for count, full, empty, reset response, and valid FWFT head data.
+3. **Occupancy:** all nine exact occupancy values are visited.
+4. **Operations:** idle, write-only, read-only, and simultaneous requests are observed.
+5. **Boundaries:** read-while-empty, write-while-full, simultaneous-at-empty, simultaneous-at-full, and simultaneous-in-interior scenarios execute and their specified effects are checked.
+6. **Reset:** initial and operational reset are exercised; the directed sweep covers every occupancy under all four enable combinations, and post-reset integrity checks pass.
+7. **Data and ordering:** representative patterns are written and read back in order; directed walking-bit sequences complete without mismatch.
+8. **Wraparound:** repeated accepted reads and writes cross the circular-buffer boundary, with ordering checked through the reference queue. Wrap coverage is described as proxy-based.
+9. **Functional coverage:** all bins in the defined 121-bin model are hit or justified as impossible and excluded; the final export and dashboard are retained.
+10. **Reproducibility:** seed, parameters, simulator, command, and source revision are recorded. The active source seed is `0xCAFEF00D`.
+11. **Mutation analysis:** released and hidden results are reported from actual runs, with survivors and residual fault classes distinguished. A 100% mutation score is not proof of complete correctness.
+12. **Documentation:** the plan, coverage analysis, findings, report, AI usage record, and team contributions agree with the checked-in implementation and run evidence.
+
+Coverage closure and mutation closure are separate sign-off items. The 121/121 result demonstrates that the defined model's bins were exercised; mutation results demonstrate detection of mutants in the stated pools. Neither replaces cycle-by-cycle scoreboard checking or resolves the limitations above.
+
+## 11. Mutation Testing and Verification Effectiveness
+
+Mutation testing assesses whether the testbench detects representative implementation faults. The team records the mutation pool, number found, total number, command, and findings. The project findings record 8/8 released practice mutants and 20/20 hidden mutants as detected. These scores describe only the tested pools.
+
+Each mutation should be analyzed for stimulus reachability and output observability. A mutant that is never activated indicates a stimulus-reachability gap. A mutant that is activated but whose effect is not checked indicates a checking or observability gap. The former calls for more stimulus; the latter calls for a stronger check supported by the specification.
+
+Residual risks involving undefined empty-state output or internal memory corruption are fault classes the current testbench may not detect. They should not be described as surviving mutants when all mutants in the recorded pools were detected.
+
+## 12. Regression and Sign-Off
+
+The final verification environment is ready for sign-off when the closure criteria in Section 10 are satisfied and evidence is preserved. The regression record should include the command, source revision, seed, parameter values, simulator version, test result, coverage export, and mutation findings. If any item changes, results must be regenerated or clearly labeled as belonging to an earlier revision.
 
 ### Final Deliverables for Project 1
+
 | Deliverable | Description |
 |---|---|
-| `vplan.md` | Verification plan and requirement traceability |
-| `tb/` | Driver, monitor, scoreboard, and reference model |
-| `crv/` | Transaction generation, constraints, and seeded regression |
-| Coverage model/report | Functional coverage implementation and results |
-| `FINDINGS.md` | Mutation score, survivor analysis, and residual risks |
-| `REPORT.pdf` | 4–6 page project report |
-| Demo link | Demonstration of the verification environment and evidence |
-| `ai_log.md` | AI prompts, predictions, measured outcomes, and fixes |
-| `CONTRIBUTIONS.md` | Individual team contributions |
+| `vplan.md` | Verification plan, feature list, test matrix, coverage model, risks, and closure criteria. |
+| Testbench sources | Driver, monitor, reference model, scoreboard, transaction generation, and directed/random stimulus. |
+| Coverage model and exports | Functional coverage implementation, YAML exports, and dashboard evidence. |
+| `FINDINGS.md` | Mutation scores, analysis, and residual fault classes. |
+| `REPORT.pdf` | Project report with results and limitations. |
+| Demo link | Demonstration of the verification environment and evidence. |
+| `ai_log.md` | AI prompts, predictions, measured outcomes, and corrections, as applicable. |
+| `CONTRIBUTIONS.md` | Individual team contributions. |
 
-All verification results will be reported with their corresponding configuration and execution evidence.
+## 13. Verification Conclusion
 
----
+This plan defines an interface-level verification strategy for the configured 8-bit, depth-8 synchronous FWFT FIFO. It combines directed corner-case sequences, occupancy-aware constrained-random stimulus, an independent queue model, cycle-level scoreboard checking, functional coverage, and mutation analysis. The feature list and test matrix provide traceability from specified behavior to stimulus and checking, while the coverage and risk sections distinguish measured results from unverified assumptions.
 
-## 10. Verification Conclusion
-The existing HW5 implementation provides the foundation for the Project 1 verification environment, Project 1 acts as student's chance to provide full-ownership in regard to a verification project. It already demonstrates constrained-random stimulus generation, occupancy-dependent biasing, reference-model checking, directed boundary testing, and successful detection of the previously evaluated mutant pool.
-
-Project 1 extends this foundation by formalizing the verification plan, establishing requirement traceability, implementing a functional coverage model, documenting coverage closure, and producing a team-level verification report.
-
-The final verification argument will be supported by simulation results, coverage evidence, reproducible regressions, and mutation analysis.
+The final verification argument must be supported by reproducible simulation results, coverage exports, mutation findings, and a clear statement of what remains outside the plan's scope. A successful result means the specified and observable behaviors in this configuration passed the defined checks; it is not a claim that every internal implementation fault or every possible parameterization has been proven correct.
